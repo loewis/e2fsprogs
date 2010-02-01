@@ -884,7 +884,7 @@ static char **parse_fs_type(const char *fs_type,
 	char		*cp, *t;
 	const char	*size_type;
 	struct str_list	list;
-	unsigned long	meg;
+	blk64_t		meg;
 	int		is_hurd = 0;
 
 	if (init_list(&list))
@@ -1019,6 +1019,22 @@ static int get_bool_from_profile(char **fs_types, const char *opt, int def_val)
 	for (cpp = fs_types; *cpp; cpp++)
 		profile_get_boolean(profile, "fs_types", *cpp, opt, ret, &ret);
 	return ret;
+}
+
+/*
+ * When setting the block count for the first time while creating a
+ * file system, we have to enable the file system's 64bit feature if
+ * the block count is greater than 32 bits.  Otherwise, only the lower
+ * 32 bits of the block count gets set.  Later, we have to check if
+ * the 64bit feature was explicitly disabled and bail out.
+ */
+
+static void set_blocks_count_enable_64bit(struct ext2_super_block *sb,
+					  blk64_t count)
+{
+	if (count > ~0U)
+		sb->s_feature_incompat |= EXT4_FEATURE_INCOMPAT_64BIT;
+	ext2fs_blocks_count_set(sb, count);
 }
 
 extern const char *mke2fs_default_profile;
@@ -1404,8 +1420,9 @@ static void PRS(int argc, char *argv[])
 			blocksize, sys_page_size);
 	}
 	if (optind < argc) {
-		ext2fs_blocks_count_set(&fs_param, parse_num_blocks2(argv[optind++],
-				fs_param.s_log_block_size));
+		set_blocks_count_enable_64bit(&fs_param,
+					      parse_num_blocks2(argv[optind++],
+					      fs_param.s_log_block_size));
 		if (!ext2fs_blocks_count(&fs_param)) {
 			com_err(program_name, 0, _("invalid blocks count - %s"),
 				argv[optind - 1]);
@@ -1420,6 +1437,84 @@ static void PRS(int argc, char *argv[])
 	check_mount(device_name, force, _("filesystem"));
 
 	fs_param.s_log_frag_size = fs_param.s_log_block_size;
+
+	if (noaction && ext2fs_blocks_count(&fs_param)) {
+		dev_size = ext2fs_blocks_count(&fs_param);
+		retval = 0;
+	} else {
+	retry:
+		retval = ext2fs_get_device_size2(device_name,
+						 EXT2_BLOCK_SIZE(&fs_param),
+						 &dev_size);
+		/* Also retry if the block size is 1K and the number
+		 * of blocks is greater than 2^32 - no point in
+		 * setting 64bit if not necessary.  For the 4
+		 * bit-range of file systems in which this will make a
+		 * difference.
+		 */
+		if (((retval == EFBIG) || (dev_size > ~0U)) &&
+		    (blocksize == 0) &&
+		    (fs_param.s_log_block_size == 0)) {
+			fs_param.s_log_block_size = 2;
+			blocksize = 4096;
+			goto retry;
+		}
+	}
+
+	if (retval == EFBIG) {
+#ifdef HAVE_OPEN64
+		char *bits = "64";
+#else
+		char *bits = "32";
+#endif
+ 		fprintf(stderr, _("%s: Size of device %s too big "
+				  "to be expressed in %s bits\n\t"
+				  "using a blocksize of %d.\n"),
+			program_name, device_name, bits,
+			EXT2_BLOCK_SIZE(&fs_param));
+		exit(1);
+	}
+get_size_failure:
+	if (retval && (retval != EXT2_ET_UNIMPLEMENTED)) {
+		com_err(program_name, retval,
+			_("while trying to determine filesystem size"));
+		exit(1);
+	}
+got_size:
+	if (!ext2fs_blocks_count(&fs_param)) {
+		if (retval == EXT2_ET_UNIMPLEMENTED) {
+			com_err(program_name, 0,
+				_("Couldn't determine device size; you "
+				"must specify\nthe size of the "
+				"filesystem\n"));
+			exit(1);
+		} else {
+			if (dev_size == 0) {
+				com_err(program_name, 0,
+				_("Device size reported to be zero.  "
+				  "Invalid partition specified, or\n\t"
+				  "partition table wasn't reread "
+				  "after running fdisk, due to\n\t"
+				  "a modified partition being busy "
+				  "and in use.  You may need to reboot\n\t"
+				  "to re-read your partition table.\n"
+				  ));
+				exit(1);
+			}
+			set_blocks_count_enable_64bit(&fs_param, dev_size);
+			if (sys_page_size > EXT2_BLOCK_SIZE(&fs_param)) {
+				blk64_t tmp = ext2fs_blocks_count(&fs_param);
+
+				tmp &= ~((blk64_t) ((sys_page_size /
+					     EXT2_BLOCK_SIZE(&fs_param))-1));
+				ext2fs_blocks_count_set(&fs_param, tmp);
+			}
+		}
+	} else if (!force && (ext2fs_blocks_count(&fs_param) > dev_size)) {
+		com_err(program_name, 0,
+			_("Filesystem larger than apparent device size."));
+		proceed_question();
+	}
 
 	fs_types = parse_fs_type(fs_type, usage_types, &fs_param, argv[0]);
 	if (!fs_types) {
@@ -1453,88 +1548,18 @@ static void PRS(int argc, char *argv[])
 	if (tmp)
 		free(tmp);
 
-	if (noaction && ext2fs_blocks_count(&fs_param)) {
-		dev_size = ext2fs_blocks_count(&fs_param);
-		retval = 0;
-	} else {
-	retry:
-		retval = ext2fs_get_device_size2(device_name,
-						 EXT2_BLOCK_SIZE(&fs_param),
-						 &dev_size);
-		if (!(fs_param.s_feature_incompat &
-		      EXT4_FEATURE_INCOMPAT_64BIT) && dev_size >= (1ULL << 32))
-			retval = EFBIG;
-
-		if ((retval == EFBIG) &&
-		    (blocksize == 0) &&
-		    (fs_param.s_log_block_size == 0)) {
-			fs_param.s_log_block_size = 2;
-			blocksize = 4096;
-			goto retry;
-		}
-	}
-
-	if (retval == EFBIG) {
-		blk64_t	big_dev_size;
-
-		if (blocksize < 4096) {
-			fs_param.s_log_block_size = 2;
-			blocksize = 4096;
-		}
-		retval = ext2fs_get_device_size2(device_name,
-				 EXT2_BLOCK_SIZE(&fs_param), &big_dev_size);
-		if (retval)
-			goto get_size_failure;
-		if (big_dev_size == (1ULL << 32)) {
-			dev_size = (blk_t) (big_dev_size - 1);
-			goto got_size;
-		}
+	/* If the user deliberately cleared the 64-bit flag, then the
+	 * file system size might be too large to be represented in 32
+	 * bits. */
+	if (!(fs_param.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) &&
+	    fs_param.s_blocks_count_hi) {
 		fprintf(stderr, _("%s: Size of device %s too big "
 				  "to be expressed in 32 bits\n\t"
-				  "using a blocksize of %d.\n"),
-			program_name, device_name, EXT2_BLOCK_SIZE(&fs_param));
+				  "using a blocksize of %d and 64 bit "
+				  "feature is disabled.\n"),
+			program_name, device_name,
+			EXT2_BLOCK_SIZE(&fs_param));
 		exit(1);
-	}
-get_size_failure:
-	if (retval && (retval != EXT2_ET_UNIMPLEMENTED)) {
-		com_err(program_name, retval,
-			_("while trying to determine filesystem size"));
-		exit(1);
-	}
-got_size:
-	if (!ext2fs_blocks_count(&fs_param)) {
-		if (retval == EXT2_ET_UNIMPLEMENTED) {
-			com_err(program_name, 0,
-				_("Couldn't determine device size; you "
-				"must specify\nthe size of the "
-				"filesystem\n"));
-			exit(1);
-		} else {
-			if (dev_size == 0) {
-				com_err(program_name, 0,
-				_("Device size reported to be zero.  "
-				  "Invalid partition specified, or\n\t"
-				  "partition table wasn't reread "
-				  "after running fdisk, due to\n\t"
-				  "a modified partition being busy "
-				  "and in use.  You may need to reboot\n\t"
-				  "to re-read your partition table.\n"
-				  ));
-				exit(1);
-			}
-			ext2fs_blocks_count_set(&fs_param, dev_size);
-			if (sys_page_size > EXT2_BLOCK_SIZE(&fs_param)) {
-				blk64_t tmp = ext2fs_blocks_count(&fs_param);
-
-				tmp &= ~((blk64_t) ((sys_page_size /
-					     EXT2_BLOCK_SIZE(&fs_param))-1));
-				ext2fs_blocks_count_set(&fs_param, tmp);
-			}
-		}
-	} else if (!force && (ext2fs_blocks_count(&fs_param) > dev_size)) {
-		com_err(program_name, 0,
-			_("Filesystem larger than apparent device size."));
-		proceed_question();
 	}
 
 	if (fs_param.s_feature_incompat & EXT3_FEATURE_INCOMPAT_JOURNAL_DEV) {
@@ -1610,6 +1635,14 @@ got_size:
 
 	if ((tmp = getenv("MKE2FS_DEVICE_SECTSIZE")) != NULL)
 		sector_size = atoi(tmp);
+
+	/* OMG.  We *still* haven't figured out the blocksize.  When
+	 * we counted the number of blocks in the file system, we were
+	 * using a block size of 1024 (EXT2FS_MIN_BLOCK_SIZE), so the
+	 * number of blocks will be less than or equal to the previous
+	 * number of blocks.  Which is a long way of saying that we
+	 * don't have to worry about the blocks count becoming 64bit.
+	 */
 
 	if (blocksize <= 0) {
 		use_bsize = get_int_from_profile(fs_types, "blocksize", 4096);
@@ -1729,6 +1762,7 @@ got_size:
 		if (n > ~0U) {
 			if (fs_param.s_feature_incompat &
 			    EXT4_FEATURE_INCOMPAT_64BIT)
+				/* XXX FIXME-64 How is this okay? */
 				num_inodes = ~0U;
 			else {
 				com_err(program_name, 0,
