@@ -101,9 +101,9 @@ static void show_stats(e2fsck_t	ctx)
 {
 	ext2_filsys fs = ctx->fs;
 	ext2_ino_t inodes, inodes_used;
-	blk_t blocks, blocks_used;
-	int dir_links;
-	int num_files, num_links;
+	blk64_t blocks, blocks_used;
+	unsigned int dir_links;
+	unsigned int num_files, num_links;
 	int frag_percent_file, frag_percent_dir, frag_percent_total;
 	int i, j;
 
@@ -129,7 +129,7 @@ static void show_stats(e2fsck_t	ctx)
 	frag_percent_total = (frag_percent_total + 5) / 10;
 
 	if (!verbose) {
-		printf(_("%s: %u/%u files (%0d.%d%% non-contiguous), %u/%u blocks\n"),
+		printf(_("%s: %u/%u files (%0d.%d%% non-contiguous), %llu/%llu blocks\n"),
 		       ctx->device_name, inodes_used, inodes,
 		       frag_percent_total / 10, frag_percent_total % 10,
 		       blocks_used, blocks);
@@ -163,7 +163,8 @@ static void show_stats(e2fsck_t	ctx)
 		fputc('\n', stdout);
 	}
 
-	printf (P_("%8u block used (%2.2f%%)\n", "%8u blocks used (%2.2f%%)\n",
+	printf (P_("%8llu block used (%2.2f%%)\n",
+		   "%8llu blocks used (%2.2f%%)\n",
 		   blocks_used), blocks_used, 100.0 * blocks_used / blocks);
 	printf (P_("%8u bad block\n", "%8u bad blocks\n",
 		   ctx->fs_badblocks_count), ctx->fs_badblocks_count);
@@ -731,7 +732,7 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			/* What we do by default, anyway! */
 			break;
 		case 'b':
-			res = sscanf(optarg, "%u", &ctx->use_superblock);
+			res = sscanf(optarg, "%llu", &ctx->use_superblock);
 			if (res != 1)
 				goto sscanf_err;
 			ctx->flags |= E2F_FLAG_SB_SPECIFIED;
@@ -1112,9 +1113,9 @@ failure:
 		__u32 blocksize = EXT2_BLOCK_SIZE(fs->super);
 		int need_restart = 0;
 
-		pctx.errcode = ext2fs_get_device_size(ctx->filesystem_name,
-						      blocksize,
-						      &ctx->num_blocks);
+		pctx.errcode = ext2fs_get_device_size2(ctx->filesystem_name,
+						       blocksize,
+						       &ctx->num_blocks);
 		/*
 		 * The floppy driver refuses to allow anyone else to
 		 * open the device if has been opened with O_EXCL;
@@ -1126,9 +1127,9 @@ failure:
 			ext2fs_close(fs);
 			need_restart++;
 			pctx.errcode =
-				ext2fs_get_device_size(ctx->filesystem_name,
-						       blocksize,
-						       &ctx->num_blocks);
+				ext2fs_get_device_size2(ctx->filesystem_name,
+							blocksize,
+							&ctx->num_blocks);
 		}
 		if (pctx.errcode == EXT2_ET_UNIMPLEMENTED)
 			ctx->num_blocks = 0;
