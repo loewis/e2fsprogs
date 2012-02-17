@@ -557,6 +557,15 @@ watermark for the unused inodes in a filesystem, to reduce
 time.  This first e2fsck run after enabling this feature will take the
 full time, but subsequent e2fsck runs will take only a fraction of the
 original time, depending on how full the file system is.
+.TP
+.B utf8only
+Restrict file names on the file sytem to UTF-8. Existing non-UTF-8 file
+names can still be accessed;
+.BR e2fsck(8)
+will rename such files the next time it runs. Attempts to create new files
+with non-UTF-8 names will trigger the
+.BR EILSEQ
+error code.
 .RE
 .IP
 After setting or clearing 

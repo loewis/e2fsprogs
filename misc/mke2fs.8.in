@@ -576,6 +576,9 @@ enabled), and can also reduce
 .BR e2fsck
 time dramatically.  It is only supported by the ext4 filesystem in
 recent Linux kernels.
+.TP
+.B utf8only
+Restrict file names on the file system to UTF-8.
 .RE
 .TP
 .B \-q
